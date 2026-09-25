@@ -35,6 +35,7 @@ Or as a service:
 ```bash
 pip install git+https://github.com/jbpayton/jevless
 jevless probe --backend lmstudio --model qwen/qwen3.5-9b      # sanity-check a model before relying on it
+jevless bench --model gpt-4.1-mini                             # 30 labelled decisions; key from $OPENAI_API_KEY
 jevless serve --backend lmstudio --model qwen/qwen3.5-9b --port 8765
 
 curl -s localhost:8765/v1/systemone -d '{
@@ -48,6 +49,33 @@ curl -s localhost:8765/v1/systemone -d '{
 The response has the same shape as Jev's: `{model, answers: {id: {type, noul | choice, probabilities, confidence | score, legend}}, usage}`. jevless adds `flip`.
 
 (The numbers shown are from Qwen3.5-9B in LM Studio, as the model loaded there as `qwen35-9b`. The examples in `examples/` read the model name from `JEVLESS_MODEL`.)
+
+## Any OpenAI-compatible endpoint
+
+Point `--url` at the server and name the environment variable that holds the key:
+
+```bash
+export MY_LLM_KEY=...                                   # or whatever your system already sets
+jevless probe --url https://llm.example.com/v1 --model my-model --api-key-env MY_LLM_KEY
+jevless bench --url https://llm.example.com/v1 --model my-model --api-key-env MY_LLM_KEY
+```
+
+- **`--url`** can be the server root, a base URL ending in `/v1`, or a full `.../chat/completions` URL with its query string (Azure). It defaults to `$OPENAI_BASE_URL`, then `https://api.openai.com`.
+- **The key** is read from `--api-key-env` (default `OPENAI_API_KEY`). `--api-key` also works, but anyone on the machine can see it in the process list.
+- **`--key-header api-key`** sends the bare key in that header instead of `Authorization: Bearer` (Azure). `--header 'Name: value'` adds any other header.
+- **Newer OpenAI models** that refuse `max_tokens` are retried with `max_completion_tokens` automatically.
+- **Reasoning models** (OpenAI's o-series, for example) return no logprobs. Use a chat model such as `gpt-4.1-mini`, or switch thinking off (`--thinking off` on vLLM or llama-server).
+
+## Comparing models
+
+`jevless bench` runs 30 hand-written, labelled decisions (14 noul, 10 choice, 6 score) with a few traps: negation, sarcasm, a memory about the wrong person, a reply with nothing behind it, and pronouns that need the rest of the sentence. It reports accuracy, log loss, Brier score, how often the two option orders disagree, and latency, then lists every miss. `--file` takes your own decisions as JSONL (the format is in `jevless/bench.py`) and `--out` saves every decision.
+
+| Model | Served by | Accuracy | Noul | Choice | Score | Log loss | Flip rate |
+|---|---|---|---|---|---|---|---|
+| Qwen3.5-9B (Q4) | LM Studio | 0.933 | 14/14 | 10/10 | 4/6 | 0.151 | 0.03 |
+| Qwen3.5-0.8B (Q8) | llama-server, CPU, via `--api-key-env` | 0.500 | 5/14 | 8/10 | 2/6 | 0.902 | 0.40 |
+
+The 0.8B answers "true" to nearly every false statement. That is the failure `probe` flags, and why a small model needs checking before you trust it. The 9B's two misses are middle-of-scale scores ("this week" read as "today", "frustrating" as "angry"). Thirty items is a smoke test for comparing models on the same footing, not a benchmark result.
 
 ## How it works
 

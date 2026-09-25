@@ -9,7 +9,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 Tops = List[Tuple[str, float]]
 
@@ -19,13 +19,19 @@ class BackendError(RuntimeError):
 
 
 class _HTTP:
-    def __init__(self, url: str, api_key: Optional[str] = None, timeout: float = 60.0, retries: int = 2):
+    """``key_header``: where the key goes. "Authorization" (the default) sends ``Bearer <key>``; any other name sends
+    the key as is (Azure OpenAI uses ``api-key``). ``headers``: extra headers for every request."""
+
+    def __init__(self, url: str, api_key: Optional[str] = None, timeout: float = 60.0, retries: int = 2,
+                 key_header: str = "Authorization", headers: Optional[Dict[str, str]] = None):
         self.url, self.api_key, self.timeout, self.retries = url.rstrip("/"), api_key, timeout, retries
+        self.key_header, self.headers = key_header, dict(headers or {})
 
     def post(self, path: str, body: dict) -> dict:
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **self.headers}
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            bearer = self.key_header.lower() == "authorization"
+            headers[self.key_header] = f"Bearer {self.api_key}" if bearer else self.api_key
         for attempt in range(self.retries + 1):
             try:
                 req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), headers=headers)
@@ -43,21 +49,37 @@ class _HTTP:
 
 
 class OpenAIChat(_HTTP):
-    """Any OpenAI-compatible /v1/chat/completions that returns logprobs: OpenAI (non-reasoning models), vLLM,
+    """Any OpenAI-compatible chat completions endpoint that returns logprobs: OpenAI (non-reasoning models), vLLM,
     llama.cpp's llama-server, SGLang, and hosted providers that pass logprobs through.
+
+    ``url`` may be the server root (``https://api.openai.com``), a base URL ending in ``/v1`` (what most SDKs call
+    base_url), or the full ``.../chat/completions`` URL, query string included (Azure OpenAI).
     ``thinking="off"`` sends chat_template_kwargs {enable_thinking: false} (Qwen3-style templates on vLLM/llama-server)."""
 
     def __init__(self, model: str, url: str = "https://api.openai.com", api_key: Optional[str] = None,
                  thinking: Optional[str] = None, **kw):
         super().__init__(url, api_key, **kw)
         self.model, self.thinking = model, thinking
+        self.max_key = "max_tokens"             # newer OpenAI models want max_completion_tokens; switched on refusal
+
+    def endpoint(self) -> str:
+        if "/chat/completions" in self.url:
+            return ""
+        return "/chat/completions" if self.url.endswith("/v1") else "/v1/chat/completions"
 
     def first_token(self, prompt: str, top_k: int = 20) -> Tuple[Tops, int]:
-        body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1,
+        body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], self.max_key: 1,
                 "temperature": 0, "logprobs": True, "top_logprobs": min(int(top_k), 20)}
         if self.thinking == "off":
             body["chat_template_kwargs"] = {"enable_thinking": False}
-        r = self.post("/v1/chat/completions", body)
+        try:
+            r = self.post(self.endpoint(), body)
+        except BackendError as e:
+            if self.max_key != "max_tokens" or "max_completion_tokens" not in str(e):
+                raise
+            self.max_key = "max_completion_tokens"
+            body[self.max_key] = body.pop("max_tokens")
+            r = self.post(self.endpoint(), body)
         try:
             first = r["choices"][0]["logprobs"]["content"][0]
         except (KeyError, IndexError, TypeError) as e:

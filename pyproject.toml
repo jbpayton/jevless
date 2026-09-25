@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jevless"
+version = "0.1.0"
+description = "Jev-style typed decisions (choice, noul, score) from any model whose API exposes first-token logprobs."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Joey Payton" }]
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["llm", "logprobs", "classification", "decisions", "agents", "lm-studio", "vllm", "llama.cpp"]
+
+[project.optional-dependencies]
+local = ["torch", "transformers"]
+test = ["pytest>=7"]
+
+[project.scripts]
+jevless = "jevless.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jbpayton/jevless"
+
+[tool.setuptools.packages.find]
+include = ["jevless*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

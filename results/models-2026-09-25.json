@@ -300,6 +300,18 @@
   "unanswered": 0
  },
  {
+  "name": "Qwen3.5-9B Q4 (this machine)",
+  "provider": "local",
+  "how": "readout",
+  "basic": 0.933,
+  "hard": 0.867,
+  "dec": 459.050054079853,
+  "tin": 178.46666666666667,
+  "tout": 2,
+  "cost": null,
+  "unanswered": 0
+ },
+ {
   "name": "claude-haiku-4-5",
   "provider": "Anthropic",
   "how": "answer (may reason)",
@@ -310,19 +322,6 @@
   "tout": 18.133333333333333,
   "cost": 0.2627,
   "unanswered": 0
- },
- {
-  "name": "Qwen3.5-9B Q4 (this machine)",
-  "provider": "local",
-  "how": "readout",
-  "basic": 0.933,
-  "hard": 0.867,
-  "dec": null,
-  "tin": 178.46666666666667,
-  "tout": 1.0,
-  "cost": null,
-  "unanswered": 0,
-  "time_note": "Not shown: local 9B (timed later, on idle GPUs)"
  },
  {
   "name": "claude-opus-5",

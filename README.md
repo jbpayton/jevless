@@ -21,6 +21,7 @@ The same 60 labelled decisions, 30 in the `basic` set and 30 in the `hard` set (
 
 | Model | Time per decision | Hard set | Cost per 1,000 decisions |
 |---|---|---|---|
+| Qwen3.5-9B Q4, local (LM Studio, 2× RTX 3090) | **0.46 s** | 0.87 | free |
 | gpt-4.1-nano | **0.47 s** | 0.77 | $0.016 |
 | gpt-4.1-mini | **0.49 s** | 0.93 | $0.065 |
 | gpt-4o-mini | 0.53 s | 0.73 | $0.024 |
@@ -28,9 +29,9 @@ The same 60 labelled decisions, 30 in the `basic` set and 30 in the `hard` set (
 | gpt-4.1 | 0.54 s | 0.93 | $0.33 |
 | gpt-5.4-mini | 0.56 s | 0.90 | $0.16 |
 
-**gpt-4.1-mini is the sweet spot:** 0.93 on the hard set, the second-fastest decision, and 6.5 cents per thousand. For the last few points: gpt-5.4 (0.97 at 0.70 s, 50 cents per thousand) and gpt-5.5 (1.00 at 0.84 s, $1.00). By cost alone: gpt-6-luna (0.93 at 1.9 cents per thousand, but 0.99 s) and gpt-6-sol (1.00 at 39 cents).
+**gpt-4.1-mini is the hosted sweet spot:** 0.93 on the hard set, the fastest hosted decision after gpt-4.1-nano, and 6.5 cents per thousand. **A local 9B is as fast and free,** at 0.87. For the last few points: gpt-5.4 (0.97 at 0.70 s, 50 cents per thousand) and gpt-5.5 (1.00 at 0.84 s, $1.00). By cost alone: gpt-6-luna (0.93 at 1.9 cents per thousand, but 0.99 s) and gpt-6-sol (1.00 at 39 cents).
 
-<p align="center"><img src="docs/pareto-time.svg" alt="Hard-set accuracy against time per decision for 31 models, with the Pareto front: gpt-4.1-nano, gpt-4.1-mini, gpt-5.4, gpt-5.5" width="820"></p>
+<p align="center"><img src="docs/pareto-time.svg" alt="Hard-set accuracy against time per decision for 32 models, with the Pareto front: local Qwen3.5-9B, gpt-4.1-mini, gpt-5.4, gpt-5.5" width="820"></p>
 <p align="center"><img src="docs/pareto-cost.svg" alt="Hard-set accuracy against cost per 1,000 decisions, with the Pareto front: gpt-4.1-nano, gpt-6-luna, gpt-6-sol" width="820"></p>
 
 The **Pareto front** is the set of models that no other model beats on both axes at once: at least as accurate, and at least as fast or as cheap.
@@ -62,8 +63,8 @@ The **Pareto front** is the set of models that no other model beats on both axes
 | claude-opus-4-7 | Anthropic | answer (may reason) | 1.00 | **0.90** | 0.92 s | 236 / 10 | $1.43 |
 | gpt-5.6-terra | OpenAI | readout, reasoning off | 1.00 | **0.90** | 1.08 s | 153 / 8 | $0.40 |
 | gpt-4-turbo | OpenAI | readout | 1.00 | **0.90** | 1.18 s | 155 / 2 | not listed |
+| Qwen3.5-9B Q4 (this machine) | local | readout | 0.93 | **0.87** | 0.46 s | 178 / 2 | free (local) |
 | claude-haiku-4-5 | Anthropic | answer (may reason) | 0.97 | **0.87** | 0.54 s | 172 / 18 | $0.26 |
-| Qwen3.5-9B Q4 (this machine) | local | readout | 0.93 | **0.87** | pending ² | 178 / 1 | free (local) |
 | claude-opus-5 ¹ | Anthropic | answer (may reason) | 0.93 | **0.80** | 1.75 s | 225 / 7 | $1.31 |
 | gpt-4.1-nano | OpenAI | readout | 0.93 | **0.77** | 0.47 s | 155 / 2 | $0.016 |
 | gpt-4o-mini | OpenAI | readout | 1.00 | **0.73** | 0.53 s | 155 / 2 | $0.024 |
@@ -71,7 +72,7 @@ The **Pareto front** is the set of models that no other model beats on both axes
 | gpt-3.5-turbo | OpenAI | readout | 0.87 | **0.63** | 0.92 s | 155 / 2 | $0.081 |
 
 ¹ claude-opus-5 left 5 of its 60 replies without an answer letter (empty, or reasoning written out as text). They count as wrong.
-² Timed later, on idle GPUs: during these runs, this machine's GPUs were busy with other benchmarks. Its accuracy is from the same sets.
+The local 9B was timed with one decision in flight on idle GPUs, which is what a single user sees. The hosted models ran four at a time, which a hosted API absorbs without slowing down. With its two option orders sent one after the other, the 9B takes 0.52 s.
 
 **How to read it:**
 - **Two ways of deciding.** *Readout* models answer in one token, and jevless reads the probability of every option; that is what jevless is for. Claude models have no logprobs API, so they run in *answer* mode: the model replies and jevless takes the letter.
@@ -127,7 +128,7 @@ Measured from this machine on 25 September 2026, median per decision on the basi
 - **Packing questions.** Several questions about one state in one request, with a readout at each answer position. The state is sent once, which saves tokens and requests against rate limits. Later answers would see the earlier ones, so this needs measuring first.
 - **Prompt caching for long states.** OpenAI caches prompts of 1,024 tokens or more on its own (jevless already puts the state first); Anthropic needs `cache_control`. This matters for long states such as a memory gate over several recalled passages.
 - **A decision cache.** The same state and question should not be asked twice.
-- **Local models.** They have the lowest floor. A 9B on this machine answers in 0.2–0.6 s cold, and in 0.11–0.15 s when the state is already cached, with no network at all.
+- **A faster local setup.** On this machine, LM Studio splits the 9B across both GPUs. Pinned to one GPU under llama-server, it generated about 35% faster in an earlier throughput test; its decision time hasn't been measured yet. A cached state (the same state asked several questions) cuts one request to 0.11–0.15 s.
 
 ## Quick start
 

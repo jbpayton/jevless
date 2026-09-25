@@ -85,7 +85,7 @@ def chart(rows, x, title, xlabel, fmt, out: Path, note: str = ""):
     items = [it for it in [("OpenAI", "circle", "OpenAI, logprob readout"),
                            ("Anthropic", "diamond", "Anthropic, answer mode (may reason)"),
                            ("local", "circle", "local 9B, logprob readout")] if it[0] in present]
-    bw, bh = 300, 24 + 17 * (len(items) + 1) + (16 if note else 0)
+    bw, bh = 300, 14 + 17 * (len(items) + 1) + (18 if note else 0)
     lx, ly = W - MR - bw + 4, H - MB - bh + 8
     s.append(f'<rect x="{lx - 10}" y="{ly - 16}" width="{bw}" height="{bh}" fill="#ffffff" stroke="#d0d7de" rx="4"/>')
     for i, (prov, shape, label) in enumerate(items):

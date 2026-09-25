@@ -3,6 +3,6 @@ from .backends import Anthropic, BackendError, LlamaCpp, LMStudio, OpenAIChat, T
 from .core import Answer, Choice, Decider, DecisionError, Noul, Score, fit_temperature
 from . import bench
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = ["Decider", "Noul", "Choice", "Score", "Answer", "DecisionError", "fit_temperature",
            "OpenAIChat", "Anthropic", "LMStudio", "LlamaCpp", "Transformers", "BackendError"]

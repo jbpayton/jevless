@@ -83,3 +83,13 @@ def test_wire_format_server_round_trip():
         urllib.request.urlopen(bad)
     assert e.value.code == 422
     srv.shutdown()
+
+
+def test_auto_reads_the_second_order_only_when_unsure():
+    sure = Fake("true:")                               # confident: one reading
+    a = Decider(sure, permutations="auto").noul("s", "It holds.")
+    assert a.orders == 1 and sure.calls == 1 and a.noul > 0.9
+    unsure = Fake("", bias=0.3)                       # weak preference for whatever is first: ask the reversed order
+    b = Decider(unsure, permutations="auto").choice("s", "Pick", {"x": None, "y": None})
+    assert b.orders == 2 and unsure.calls == 2 and abs(b.probabilities["x"] - 0.5) < 1e-6
+    assert Decider(Fake("true:"), permutations=2).noul("s", "q").orders == 2

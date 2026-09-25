@@ -13,55 +13,76 @@ It includes a local server that speaks the same `/v1/systemone` request shape, b
 
 > Not affiliated with TypeSafe. "Jev" is their product; jevless is an independent, open implementation of the same idea over ordinary model APIs.
 
-## Results: 32 models, one decision at a time
+## Results: 31 hosted models and a local 9B, one decision at a time
 
-The same 60 labelled decisions (the `basic` and `hard` sets below) put to every model two API keys could reach, plus a local 9B, on 25 September 2026. **Round trip** is the median time for one request from this machine, network included. A **decision** is two requests, one per option order. In this table they were made one after the other; since v0.4 they go out together, so a decision takes about one round trip (see [Making decisions fast](#making-decisions-fast)).
+The same 60 labelled decisions, 30 in the `basic` set and 30 in the `hard` set ([below](#comparing-models)), put to every model two API keys could reach on 25 September 2026, using jevless v0.4. A decision reads both option orders, sent in parallel. **Time** is the median per decision from this machine, network included. **Cost** is from the measured tokens at each provider's list price ([OpenAI](https://developers.openai.com/api/docs/pricing), [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing), read the same day).
 
-| Model | Provider | How it decides | Basic | Hard | Round trip | Per decision |
-|---|---|---|---|---|---|---|
-| gpt-5.5 | OpenAI | readout, reasoning off | 1.00 | **1.00** | 0.87 s | 1.7 s |
-| gpt-6-sol | OpenAI | readout, reasoning off | 1.00 | **1.00** | 1.24 s | 2.5 s |
-| claude-opus-4-6 | Anthropic | answer (may reason) | 1.00 | **1.00** | 1.34 s | 2.7 s |
-| claude-opus-5-5 | Anthropic | answer (may reason) | 1.00 | **1.00** | 2.00 s | 4.0 s |
-| claude-fable-5 | Anthropic | answer (may reason) | 1.00 | **1.00** | 2.57 s | 5.1 s |
-| claude-fable-5-1 | Anthropic | answer (may reason) | 1.00 | **1.00** | 3.52 s | 7.0 s |
-| gpt-5.4 | OpenAI | readout, reasoning off | 1.00 | **0.97** | 0.73 s | 1.5 s |
-| claude-sonnet-4-6 | Anthropic | answer (may reason) | 1.00 | **0.97** | 1.02 s | 2.0 s |
-| claude-opus-4-5-20251101 | Anthropic | answer (may reason) | 1.00 | **0.97** | 1.11 s | 2.2 s |
-| claude-sonnet-4-5-20250929 | Anthropic | answer (may reason) | 1.00 | **0.97** | 2.47 s | 4.9 s |
-| gpt-4.1 | OpenAI | readout | 1.00 | **0.93** | 0.58 s | 1.2 s |
-| gpt-4.1-mini | OpenAI | readout | 1.00 | **0.93** | 0.60 s | 1.2 s |
-| gpt-5.4-mini | OpenAI | readout, reasoning off | 1.00 | **0.93** | 0.62 s | 1.2 s |
-| gpt-5.1 | OpenAI | readout, reasoning off | 1.00 | **0.93** | 0.80 s | 1.6 s |
-| gpt-5.6-sol | OpenAI | readout, reasoning off | 1.00 | **0.93** | 0.91 s | 1.8 s |
-| claude-opus-4-8 | Anthropic | answer (may reason) | 1.00 | **0.93** | 0.92 s | 1.9 s |
-| claude-sonnet-5 | Anthropic | answer (may reason) | 1.00 | **0.93** | 1.05 s | 2.1 s |
-| gpt-4o | OpenAI | readout | 1.00 | **0.90** | 0.57 s | 1.1 s |
-| claude-opus-4-7 | Anthropic | answer (may reason) | 1.00 | **0.90** | 0.75 s | 1.5 s |
-| gpt-5.6-luna | OpenAI | readout, reasoning off | 0.97 | **0.90** | 0.77 s | 1.5 s |
-| gpt-5.6-terra | OpenAI | readout, reasoning off | 1.00 | **0.90** | 0.88 s | 1.8 s |
-| gpt-6-luna | OpenAI | readout, reasoning off | 1.00 | **0.90** | 0.89 s | 1.8 s |
-| gpt-5.2 | OpenAI | readout, reasoning off | 1.00 | **0.90** | 0.93 s | 1.9 s |
-| gpt-4-turbo | OpenAI | readout | 1.00 | **0.90** | 1.18 s | 2.4 s |
-| claude-haiku-4-5-20251001 | Anthropic | answer (may reason) | 0.97 | **0.87** | 0.53 s | 1.1 s |
-| gpt-4 | OpenAI | readout | 1.00 | **0.87** | 0.84 s | 1.7 s |
-| Qwen3.5-9B Q4 (this machine, LM Studio) | local | readout | 0.93 | **0.87** | 1.30 s | 2.6 s |
-| claude-opus-5 ¹ | Anthropic | answer (may reason) | 0.93 | **0.87** | 1.56 s | 3.1 s |
-| gpt-4.1-nano | OpenAI | readout | 0.93 | **0.77** | 0.50 s | 1.0 s |
-| gpt-4o-mini | OpenAI | readout | 1.00 | **0.73** | 0.55 s | 1.1 s |
-| gpt-5.4-nano | OpenAI | readout, reasoning off | 0.90 | **0.67** | 0.66 s | 1.3 s |
-| gpt-3.5-turbo | OpenAI | readout | 0.87 | **0.67** | 0.89 s | 1.8 s |
+**Fastest decisions:**
+
+| Model | Time per decision | Hard set | Cost per 1,000 decisions |
+|---|---|---|---|
+| gpt-4.1-nano | **0.47 s** | 0.77 | $0.016 |
+| gpt-4.1-mini | **0.49 s** | 0.93 | $0.065 |
+| gpt-4o-mini | 0.53 s | 0.73 | $0.024 |
+| claude-haiku-4-5 (answer mode) | 0.54 s | 0.87 | $0.26 |
+| gpt-4.1 | 0.54 s | 0.93 | $0.33 |
+| gpt-5.4-mini | 0.56 s | 0.90 | $0.16 |
+
+**gpt-4.1-mini is the sweet spot:** 0.93 on the hard set, the second-fastest decision, and 6.5 cents per thousand. For the last few points: gpt-5.4 (0.97 at 0.70 s, 50 cents per thousand) and gpt-5.5 (1.00 at 0.84 s, $1.00). By cost alone: gpt-6-luna (0.93 at 1.9 cents per thousand, but 0.99 s) and gpt-6-sol (1.00 at 39 cents).
+
+<p align="center"><img src="docs/pareto-time.svg" alt="Hard-set accuracy against time per decision for 31 models, with the Pareto front: gpt-4.1-nano, gpt-4.1-mini, gpt-5.4, gpt-5.5" width="820"></p>
+<p align="center"><img src="docs/pareto-cost.svg" alt="Hard-set accuracy against cost per 1,000 decisions, with the Pareto front: gpt-4.1-nano, gpt-6-luna, gpt-6-sol" width="820"></p>
+
+The **Pareto front** is the set of models that no other model beats on both axes at once: at least as accurate, and at least as fast or as cheap.
+
+| Model | Provider | How it decides | Basic | Hard | Time per decision | Tokens in / out | Cost per 1,000 decisions |
+|---|---|---|---|---|---|---|---|
+| gpt-5.5 | OpenAI | readout, reasoning off | 1.00 | **1.00** | 0.84 s | 153 / 8 | $1.00 |
+| gpt-6-sol | OpenAI | readout, reasoning off | 1.00 | **1.00** | 1.25 s | 153 / 8 | $0.39 |
+| claude-opus-4-6 | Anthropic | answer (may reason) | 1.00 | **1.00** | 1.78 s | 172 / 20 | $1.36 |
+| claude-opus-5-5 | Anthropic | answer (may reason) | 1.00 | **1.00** | 2.23 s | 230 / 33 | $1.58 |
+| claude-fable-5 | Anthropic | answer (may reason) | 1.00 | **1.00** | 2.52 s | 226 / 12 | $2.88 |
+| claude-fable-5-1 | Anthropic | answer (may reason) | 1.00 | **1.00** | 3.70 s | 230 / 15 | $3.07 |
+| gpt-5.4 | OpenAI | readout, reasoning off | 1.00 | **0.97** | 0.70 s | 153 / 8 | $0.50 |
+| claude-sonnet-4-6 | Anthropic | answer (may reason) | 1.00 | **0.97** | 1.10 s | 172 / 13 | $0.72 |
+| claude-sonnet-4-5 | Anthropic | answer (may reason) | 1.00 | **0.97** | 1.14 s | 172 / 68 | $1.54 |
+| claude-opus-4-5 | Anthropic | answer (may reason) | 1.00 | **0.97** | 1.19 s | 172 / 24 | $1.45 |
+| gpt-4.1-mini | OpenAI | readout | 1.00 | **0.93** | 0.49 s | 155 / 2 | $0.065 |
+| gpt-4.1 | OpenAI | readout | 1.00 | **0.93** | 0.54 s | 155 / 2 | $0.33 |
+| gpt-5.1 | OpenAI | readout, reasoning off | 1.00 | **0.93** | 0.66 s | 153 / 20 | $0.39 |
+| gpt-5.6-luna | OpenAI | readout, reasoning off | 0.97 | **0.93** | 0.84 s | 153 / 8 | $0.040 |
+| gpt-6-luna | OpenAI | readout, reasoning off | 1.00 | **0.93** | 0.99 s | 153 / 8 | $0.019 |
+| claude-opus-4-8 | Anthropic | answer (may reason) | 1.00 | **0.93** | 1.00 s | 226 / 10 | $1.38 |
+| gpt-5.6-sol | OpenAI | readout, reasoning off | 1.00 | **0.93** | 1.13 s | 153 / 8 | $0.39 |
+| claude-sonnet-5 | Anthropic | answer (may reason) | 1.00 | **0.93** | 1.23 s | 226 / 15 | $0.60 |
+| gpt-5.4-mini | OpenAI | readout, reasoning off | 1.00 | **0.90** | 0.56 s | 153 / 9 | $0.16 |
+| gpt-4o | OpenAI | readout | 1.00 | **0.90** | 0.57 s | 155 / 2 | $0.41 |
+| gpt-4 | OpenAI | readout | 1.00 | **0.90** | 0.88 s | 155 / 2 | not listed |
+| gpt-5.2 | OpenAI | readout, reasoning off | 1.00 | **0.90** | 0.89 s | 153 / 8 | $0.38 |
+| claude-opus-4-7 | Anthropic | answer (may reason) | 1.00 | **0.90** | 0.92 s | 236 / 10 | $1.43 |
+| gpt-5.6-terra | OpenAI | readout, reasoning off | 1.00 | **0.90** | 1.08 s | 153 / 8 | $0.40 |
+| gpt-4-turbo | OpenAI | readout | 1.00 | **0.90** | 1.18 s | 155 / 2 | not listed |
+| claude-haiku-4-5 | Anthropic | answer (may reason) | 0.97 | **0.87** | 0.54 s | 172 / 18 | $0.26 |
+| Qwen3.5-9B Q4 (this machine) | local | readout | 0.93 | **0.87** | pending ² | 178 / 1 | free (local) |
+| claude-opus-5 ¹ | Anthropic | answer (may reason) | 0.93 | **0.80** | 1.75 s | 225 / 7 | $1.31 |
+| gpt-4.1-nano | OpenAI | readout | 0.93 | **0.77** | 0.47 s | 155 / 2 | $0.016 |
+| gpt-4o-mini | OpenAI | readout | 1.00 | **0.73** | 0.53 s | 155 / 2 | $0.024 |
+| gpt-5.4-nano | OpenAI | readout, reasoning off | 0.90 | **0.67** | 0.62 s | 153 / 8 | $0.041 |
+| gpt-3.5-turbo | OpenAI | readout | 0.87 | **0.63** | 0.92 s | 155 / 2 | $0.081 |
 
 ¹ claude-opus-5 left 5 of its 60 replies without an answer letter (empty, or reasoning written out as text). They count as wrong.
+² Timed later, on idle GPUs: during these runs, this machine's GPUs were busy with other benchmarks. Its accuracy is from the same sets.
 
 **How to read it:**
-- **Two ways of deciding.** *Readout* models answer in one token, and jevless reads the probability of every option; that is what jevless is for. Claude models have no logprobs API, so they run in *answer* mode: the model replies and jevless takes the letter. claude-opus-5-5, claude-fable-5 and claude-fable-5-1 can't switch thinking off, so they ran with adaptive thinking at low effort. The other nine ran with thinking disabled, though some still work through a hard item in the reply itself (claude-sonnet-4-5 does). Reasoning helps on the hard set and costs time. Compare accuracy within a mode; the round-trip column compares across them.
-- **Fastest:** gpt-4.1-nano (0.50 s), claude-haiku-4-5 (0.53 s), gpt-4o (0.57 s), gpt-4.1 and gpt-4.1-mini (about 0.6 s).
-- **Most accurate for the time:** gpt-4.1 and gpt-4.1-mini (0.93 at 0.6 s), gpt-5.4 (0.97 at 0.73 s), gpt-5.5 (1.00 at 0.87 s). In answer mode: claude-opus-4-6 (1.00 at 1.3 s) and claude-sonnet-4-6 (0.97 at 1.0 s).
-- **Small models slip on the hard set:** gpt-4o-mini 0.73, gpt-4.1-nano 0.77, gpt-5.4-nano 0.67.
-- **The local 9B** was timed while this machine's GPUs were busy with other benchmarks. Idle, one request on it takes 0.2–0.6 s, and 0.1–0.15 s when the state is already cached (see [measured](#what-its-good-for-measured)).
-- **Faster since.** v0.4 sends both option orders at once and reuses connections, which roughly halves the time per decision (below).
-- **Scale.** Thirty items per set: fine for comparing models on the same footing, not a benchmark result.
+- **Two ways of deciding.** *Readout* models answer in one token, and jevless reads the probability of every option; that is what jevless is for. Claude models have no logprobs API, so they run in *answer* mode: the model replies and jevless takes the letter.
+  - claude-opus-5-5, claude-fable-5 and claude-fable-5-1 can't switch thinking off, so they ran with adaptive thinking at low effort. The others ran with thinking disabled, though some still work through a hard item in the reply itself.
+  - Reasoning helps on the hard set and costs time and output tokens. Compare accuracy within a mode; time and cost compare across them.
+- **Tokens:**
+  - Input is about 155 tokens a decision: two orders of about 77 each.
+  - Output is 2 for the classic OpenAI models, one per order. GPT-5.x models add a few hidden tokens (8 in total; 20 for gpt-5.1), and Claude's output includes any reasoning.
+  - A streamed Claude reply cut short at its letter has its output estimated from the text received.
+- **Run to run,** accuracy moves by a question or two: OpenAI's logprobs are not perfectly deterministic. The v0.3 run of this table gave gpt-3.5-turbo 0.67 on the hard set; this one gives 0.63.
+- **Scale.** Thirty items per set: fine for comparing models on the same footing, not a benchmark result. `python scripts/plot_results.py results/models-2026-09-25.json docs/` redraws the charts from the data.
 
 ## Making decisions fast
 
@@ -83,15 +104,26 @@ Measured from this machine on 25 September 2026, median per decision on the basi
 - **Streaming in answer mode.** Claude Haiku writes its letter at about 400 ms and keeps explaining until about 700 ms. jevless reads the stream and stops at the letter, which saves time and output tokens.
 
 **Available but not the default:**
+- **Adaptive second order** (`--orders auto`, or `Decider(permutations="auto")`). Read one order, and read the reversed one only when the first reading's top option is below `auto_threshold` (default 0.9). Measured on six OpenAI models, both sets:
+
+  | Model | Both orders: hard, tokens in, log loss | Adaptive: hard, tokens in, log loss | Second order needed |
+  |---|---|---|---|
+  | gpt-4.1-mini | 0.93, 155, 0.19 | 0.93, 80, 0.51 | 3% |
+  | gpt-4.1 | 0.93, 155, 0.11 | 0.93, 77, 0.24 | 0% |
+  | gpt-5.4 | 0.97, 153, 0.06 | 0.97, 79, 0.08 | 3% |
+  | gpt-5.4-mini | 0.90, 153, 0.17 | 0.90, 84, 0.18 | 10% |
+  | gpt-4o-mini | 0.73, 155, 1.01 | 0.77, 81, 1.15 | 5% |
+  | gpt-4.1-nano | 0.77, 155, 0.72 | 0.77, 84, 1.16 | 8% |
+
+  Accuracy stayed the same (one item better on gpt-4o-mini), input tokens halved, and decisions were 5–15% faster, since nothing waits on the slower of two requests. **Calibration got worse:** a model that is confidently wrong in one order is no longer tempered by the other, and the flip signal is gone for confident decisions. Raising the threshold to 0.99 barely helped: these models are over 99% sure on most first readings, including wrong ones. Use `auto` when you need the choice and care about cost. Keep both orders when you threshold or calibrate the probabilities.
 - **Priority processing** (`--extra-body '{"service_tier": "priority"}'` on OpenAI): 429 → 390 ms per request for gpt-4.1-mini, 518 → 493 ms for gpt-5.4-mini, at a higher price.
-- **One order** (`--orders 1`): half the tokens, the same time now that orders run in parallel, and no protection against position bias.
+- **One order** (`--orders 1`): half the tokens and no protection against position bias. `auto` is the same saving with a check on unsure decisions.
 
 **Not faster:**
 - **Shorter prompts.** On the bench items, jevless's own wording is 46 of a median 70 tokens; on a real state of a few hundred tokens it is under a tenth. Prefill is a sliver of the server's 360 ms, so trimming saves money, not time, and it costs accuracy. A lean version (no section labels or instruction line, bare `true`/`false`, levels without `level N:`) was 40% shorter, 105 against 155 billed tokens per decision. It scored lower on all three models tried: gpt-4.1-mini 0.967 → 0.917, gpt-5.4-mini 0.967 → 0.950, gpt-4.1-nano 0.850 → 0.833. The items it lost were the reasoning ones (a discount, a leap-year date, unit prices), and every lost true/false item flipped to "true". So the spelled-out wording stays.
 - **Streaming a readout.** The answer is the first token, so it arrives with the whole response. GPT-5.x adds only a few hidden tokens (462 ms to the answer against 469 ms for the whole reply).
 
 **Not built yet:**
-- **Adaptive second order.** Read one order and ask the second only when the first is unsure. That halves tokens on confident decisions, at one extra round trip on unsure ones.
 - **Packing questions.** Several questions about one state in one request, with a readout at each answer position. The state is sent once, which saves tokens and requests against rate limits. Later answers would see the earlier ones, so this needs measuring first.
 - **Prompt caching for long states.** OpenAI caches prompts of 1,024 tokens or more on its own (jevless already puts the state first); Anthropic needs `cache_control`. This matters for long states such as a memory gate over several recalled passages.
 - **A decision cache.** The same state and question should not be asked twice.
@@ -157,7 +189,7 @@ jevless bench --url https://llm.example.com/v1 --model my-model --api-key-env MY
 - **`--set hard`**: 30 more, harder for a model that has to answer in one token with no reasoning. They include arithmetic, a leap-year due date, stacked negation, "all except", log lines out of order, a web page with a hidden instruction, units, a syllogism with a false premise, a code trace, a false-belief question, a notice deadline, and a right answer shown as option 7 of 8.
 - **`--file`** takes your own decisions as JSONL (the format is in `jevless/bench.py`); `--out` saves every decision.
 
-Results are [at the top](#results-32-models-one-decision-at-a-time). Notes on running them:
+Results are [at the top](#results-31-hosted-models-and-a-local-9b-one-decision-at-a-time). Notes on running them:
 
 - **Which OpenAI models work.** The GPT-3.5, GPT-4, GPT-4o and GPT-4.1 families return logprobs as they are. GPT-5.1 and later (including gpt-6-luna and gpt-6-sol) return them only with reasoning off, which jevless sets on its own. gpt-5, gpt-5-mini, gpt-5-nano, the o-series and gpt-6-astra refuse logprobs; the `-chat-latest` aliases are retired.
 - **Adapting to newer models.** jevless reads each refusal and adjusts once: `max_completion_tokens` instead of `max_tokens`, with room for a few hidden tokens; `top_logprobs` capped at 5; no `temperature`; reasoning off. The Anthropic backend does the same for `temperature` and thinking.

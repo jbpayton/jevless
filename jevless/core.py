@@ -76,6 +76,8 @@ class Answer:
     flip: bool = False
     latency_ms: float = 0.0
     input_tokens: int = 0
+    output_tokens: int = 0
+    orders: int = 0                                         # option orders read: 1, or 2
     decision_id: str = ""
     legend: Dict[str, str] = field(default_factory=dict)
     raw: List[Dict[str, float]] = field(default_factory=list)
@@ -145,6 +147,12 @@ def render(state_text: str, instructions: str, descs: Sequence[str], qtype: str)
             f"Answer with the single letter only.")
 
 
+def _perms(p: Union[int, str]) -> Union[int, str]:
+    if p == "auto":
+        return p
+    return max(1, min(2, int(p)))
+
+
 def _softmax(v: Sequence[float]) -> List[float]:
     m = max(v)
     w = [math.exp(x - m) for x in v]
@@ -156,25 +164,28 @@ def _softmax(v: Sequence[float]) -> List[float]:
 class Decider:
     """decide = Decider(LMStudio("qwen/qwen3.5-9b")); decide.noul(state, "The customer is asking for a refund.")"""
 
-    def __init__(self, backend, *, permutations: int = 2, temperatures: Optional[Dict[str, float]] = None,
+    def __init__(self, backend, *, permutations: Union[int, str] = 2, temperatures: Optional[Dict[str, float]] = None,
                  top_k: int = 20, workers: int = 4, log: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 parallel_orders: bool = True):
-        """``parallel_orders``: send the two option orders at once (one round trip per decision instead of two).
+                 parallel_orders: bool = True, auto_threshold: float = 0.9):
+        """``permutations``: 2 reads both option orders (cancels position bias), 1 reads one, "auto" reads one and adds
+        the reversed order only when the first reading's top option is below ``auto_threshold``.
+        ``parallel_orders``: send the two option orders at once (one round trip per decision instead of two).
         Switch it off for a local server with a single slot, where parallel requests only queue."""
+        self.auto_threshold = auto_threshold
         self.backend, self.parallel_orders = backend, parallel_orders
         self._pools: Dict[str, ThreadPoolExecutor] = {}
         self._pools_lock = threading.Lock()
-        self.permutations = max(1, min(2, permutations))
+        self.permutations = _perms(permutations)
         self.temperatures = {"choice": 1.0, "noul": 1.0, "score": 1.0, **(temperatures or {})}
         self.top_k, self.workers, self.log = top_k, workers, log
 
-    def ask(self, state: Text, q: Question, permutations: Optional[int] = None) -> Answer:
+    def ask(self, state: Text, q: Question, permutations: Union[int, str, None] = None) -> Answer:
         keys, descs, qtype = _options(q)
         k = len(keys)
         if not 2 <= k <= len(LETTERS):
             raise DecisionError(f"jevless supports 2..{len(LETTERS)} options per question (got {k})")
-        perms = self.permutations if permutations is None else max(1, min(2, permutations))
-        orders = [list(range(k))] + ([list(range(k))[::-1]] if perms == 2 else [])
+        perms = self.permutations if permutations is None else _perms(permutations)
+        forward, backward = list(range(k)), list(range(k))[::-1]
         state_text, instructions = _text(state), _text(q.instructions)
         t0 = time.perf_counter()
 
@@ -182,13 +193,9 @@ class Decider:
             return self.backend.first_token(render(state_text, instructions, [descs[i] for i in order], qtype),
                                             max(self.top_k, k))
 
-        if len(orders) > 1 and self.parallel_orders:          # the orders don't depend on each other
-            readings = list(self._pool("orders").map(read, orders))
-        else:
-            readings = [read(o) for o in orders]
-        per_order, raws, tokens = [], [], 0
-        for order, (tops, n_in) in zip(orders, readings):
-            tokens += n_in
+        def declared(order, reading):
+            """One reading's probabilities, in the declared option order."""
+            tops = reading[0]
             letter_lp: Dict[str, float] = {}
             for tok, lp in tops:
                 t = tok.strip().rstrip(")").strip()
@@ -197,17 +204,36 @@ class Decider:
             if not letter_lp:
                 raise DecisionError(f"no option letter among the model's top tokens {[t for t, _ in tops][:6]} "
                                     "(is reasoning/thinking switched off?)")
-            raws.append(letter_lp)
             floor = min(letter_lp.values()) - 5.0            # a letter outside the top-k: well below the worst seen
             probs = _softmax([letter_lp.get(LETTERS[j], floor) / self.temperatures[qtype] for j in range(k)])
-            declared = [0.0] * k
+            out = [0.0] * k
             for j, oi in enumerate(order):
-                declared[oi] = probs[j]
-            per_order.append(declared)
+                out[oi] = probs[j]
+            return out, letter_lp
+
+        if perms == "auto":                                  # the second order only when the first is unsure
+            orders, readings = [forward], [read(forward)]
+            if max(declared(forward, readings[0])[0]) < self.auto_threshold:
+                orders.append(backward)
+                readings.append(read(backward))
+        else:
+            orders = [forward] + ([backward] if perms == 2 else [])
+            if len(orders) > 1 and self.parallel_orders:      # the orders don't depend on each other
+                readings = list(self._pool("orders").map(read, orders))
+            else:
+                readings = [read(o) for o in orders]
+        per_order, raws, tokens, out_tokens = [], [], 0, 0
+        for order, reading in zip(orders, readings):
+            tokens += reading[1]                              # backends may add output tokens as a third value
+            out_tokens += reading[2] if len(reading) > 2 else 0
+            probs_o, letter_lp = declared(order, reading)
+            raws.append(letter_lp)
+            per_order.append(probs_o)
         probs = [sum(p[i] for p in per_order) / len(per_order) for i in range(k)]
         flip = len(per_order) > 1 and max(range(k), key=lambda i: per_order[0][i]) != max(range(k), key=lambda i: per_order[1][i])
         ans = Answer(qtype, keys, {keys[i]: probs[i] for i in range(k)}, flip, (time.perf_counter() - t0) * 1000,
-                     tokens, raw=raws, legend={str(i): d for i, d in enumerate(q.criteria)} if qtype == "score" else {})
+                     tokens, out_tokens, len(orders), raw=raws,
+                     legend={str(i): d for i, d in enumerate(q.criteria)} if qtype == "score" else {})
         if self.log:
             rec = {"ts": time.time(), "type": qtype, "state_sha": hashlib.sha1(state_text.encode()).hexdigest()[:16],
                    "instructions": instructions, "options": keys, "probabilities": probs, "raw": raws, "flip": int(flip)}
@@ -252,7 +278,7 @@ class Decider:
         answers = self.many(request["state"], qs)
         return {"model": request.get("model", "jevless"), "answers": {k: a.to_wire() for k, a in answers.items()},
                 "usage": {"input_tokens": sum(a.input_tokens for a in answers.values()),
-                          "output_tokens": sum(self.permutations for _ in answers)}}
+                          "output_tokens": sum(a.output_tokens or a.orders for a in answers.values())}}
 
 
 # ------------------------------------------------------------------ calibration

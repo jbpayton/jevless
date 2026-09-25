@@ -176,7 +176,7 @@ def _one(decider: Decider, item: Mapping[str, Any]) -> Dict[str, Any]:
             "correct": a.choice == gold, "p_gold": probs[gold], "confidence": a.confidence, "flip": a.flip,
             "brier": sum((p - (k == gold)) ** 2 for k, p in probs.items()),
             "latency_ms": a.latency_ms, "request_ms": a.latency_ms / max(1, len(a.raw) * getattr(decider.backend, "samples", 1)),
-            "input_tokens": a.input_tokens}
+            "input_tokens": a.input_tokens, "output_tokens": a.output_tokens, "orders": a.orders}
 
 
 def _stats(rows: Sequence[Dict[str, Any]], calibrated: bool = True) -> Dict[str, Any]:
@@ -191,7 +191,9 @@ def _stats(rows: Sequence[Dict[str, Any]], calibrated: bool = True) -> Dict[str,
             "flip_rate": round(sum(r["flip"] for r in ok) / len(ok), 3),
             "p50_ms": round(statistics.median(r["latency_ms"] for r in ok)),
             "p50_request_ms": round(statistics.median(r["request_ms"] for r in ok)),
-            "mean_input_tokens": round(sum(r["input_tokens"] for r in ok) / len(ok))}
+            "mean_input_tokens": round(sum(r["input_tokens"] for r in ok) / len(ok)),
+            "mean_output_tokens": round(sum(r.get("output_tokens", 0) for r in ok) / len(ok), 1),
+            "mean_orders": round(sum(r.get("orders", 0) for r in ok) / len(ok), 2)}
 
 
 def run(decider: Decider, items: Sequence[Mapping[str, Any]], workers: int = 4) -> Dict[str, Any]:

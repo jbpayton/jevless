@@ -36,7 +36,7 @@ class Stub:
                 else:
                     data = json.dumps({"choices": [{"logprobs": {"content": [{"token": "A", "logprob": -0.1,
                                       "top_logprobs": [{"token": "A", "logprob": -0.1}, {"token": "B", "logprob": -2.5}]}]}}],
-                                       "usage": {"prompt_tokens": 42}}).encode()
+                                       "usage": {"prompt_tokens": 42, "completion_tokens": 1}}).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -240,3 +240,8 @@ def test_connections_are_kept_alive():
 def test_extra_body_is_sent(stub):
     Decider(OpenAIChat("m", url=stub.root, extra_body={"service_tier": "priority"}), permutations=1).noul("s", "q")
     assert stub.seen[-1]["body"]["service_tier"] == "priority"
+
+
+def test_tokens_are_counted_per_decision(stub):
+    a = Decider(OpenAIChat("m", url=stub.root)).noul("s", "q")          # two orders
+    assert a.input_tokens == 84 and a.output_tokens == 2

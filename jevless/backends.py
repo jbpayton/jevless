@@ -194,8 +194,9 @@ class OpenAIChat(_HTTP):
             first = r["choices"][0]["logprobs"]["content"][0]
         except (KeyError, IndexError, TypeError) as e:
             raise BackendError(f"no logprobs in the response (does this server support them?): {str(r)[:200]}") from e
+        usage = r.get("usage") or {}
         return [(t["token"], float(t["logprob"])) for t in first.get("top_logprobs", [])], \
-            int((r.get("usage") or {}).get("prompt_tokens") or 0)
+            int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
 
 
 class LMStudio(_HTTP):
@@ -214,8 +215,9 @@ class LMStudio(_HTTP):
         if not msgs or not msgs[0]["content"][0].get("logprobs"):
             raise BackendError(f"no logprobs in the response: {str(r)[:200]}")
         first = msgs[0]["content"][0]["logprobs"][0]
+        usage = r.get("usage") or {}
         return [(t["token"], float(t["logprob"])) for t in first.get("top_logprobs", [])], \
-            int((r.get("usage") or {}).get("input_tokens") or 0)
+            int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
 
 
 class Anthropic(_HTTP):
@@ -265,7 +267,7 @@ class Anthropic(_HTTP):
             return True
         return False
 
-    def _call(self, prompt: str) -> Tuple[str, int]:
+    def _call(self, prompt: str) -> Tuple[str, int, int]:
         for _ in range(5):
             body = self._body(prompt)
             try:
@@ -276,19 +278,26 @@ class Anthropic(_HTTP):
                         raise
         raise BackendError("the server kept refusing the request")
 
-    def _whole(self, body: dict) -> Tuple[str, int]:
+    def _whole(self, body: dict) -> Tuple[str, int, int]:
         r = self.post("/v1/messages", body)
         text = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
-        return text, int((r.get("usage") or {}).get("input_tokens") or 0)
+        usage = r.get("usage") or {}
+        return text, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
 
-    def _reply(self, body: dict) -> Tuple[str, int]:
-        text, tokens = "", 0
+    def _reply(self, body: dict) -> Tuple[str, int, int]:
+        """Output tokens come from the final usage event; a reply cut short at its letter never sends one, so
+        its output is estimated from the text received (about 4 characters a token)."""
+        text, tokens, out, seen = "", 0, None, 0
         events = self.stream("/v1/messages", body)
         try:
             for ev in events:
                 kind = ev.get("type")
                 if kind == "message_start":
                     tokens = int(((ev.get("message") or {}).get("usage") or {}).get("input_tokens") or 0)
+                elif kind == "message_delta":
+                    out = int((ev.get("usage") or {}).get("output_tokens") or 0) or out
+                elif kind == "content_block_delta" and (ev.get("delta") or {}).get("type") == "thinking_delta":
+                    seen += len(ev["delta"].get("thinking", ""))
                 elif kind == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
                     text += ev["delta"].get("text", "")
                     head = text.lstrip()
@@ -298,7 +307,7 @@ class Anthropic(_HTTP):
                     raise BackendError(f"stream error: {ev.get('error')}")
         finally:
             events.close()
-        return text, tokens
+        return text, tokens, out if out is not None else max(1, -(-(seen + len(text)) // 4))
 
     @classmethod
     def letter(cls, text: str) -> Optional[str]:
@@ -318,15 +327,16 @@ class Anthropic(_HTTP):
 
     def first_token(self, prompt: str, top_k: int = 20) -> Tuple[Tops, int]:
         counts: Dict[str, int] = {}
-        tokens = 0
+        tokens = out = 0
         for _ in range(self.samples):
-            text, tokens = self._call(prompt)
+            text, tokens, n_out = self._call(prompt)
+            out += n_out
             got = self.letter(text)
             if got:
                 counts[got] = counts.get(got, 0) + 1
         if not counts:
             raise BackendError(f"no answer letter in the reply: {text[:120]!r}")
-        return [(t, math.log(c / self.samples)) for t, c in sorted(counts.items(), key=lambda kv: -kv[1])], tokens
+        return [(t, math.log(c / self.samples)) for t, c in sorted(counts.items(), key=lambda kv: -kv[1])], tokens, out
 
 
 class LlamaCpp(_HTTP):

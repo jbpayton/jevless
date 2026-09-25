@@ -86,15 +86,17 @@ def main(argv=None):
     ap.add_argument("--thinking", default=None, choices=[None, "off"], help="off: disable Qwen3-style thinking")
     ap.add_argument("--reasoning-effort", default=None,
                     help="sent as reasoning_effort (OpenAI GPT-5.1+ need 'none' for logprobs; set automatically if refused)")
-    ap.add_argument("--orders", type=int, default=2, help="1 or 2 option orders (2 cancels position bias)")
+    ap.add_argument("--orders", default="2", choices=["1", "2", "auto"],
+                    help="option orders to read: 2 cancels position bias; auto reads the second only when the first is unsure")
+    ap.add_argument("--auto-threshold", type=float, default=0.9, help="auto: read the second order below this confidence")
     ap.add_argument("--state", default="")
     ap.add_argument("--noul", default="")
     ap.add_argument("--choice", nargs="+", default=None, metavar=("QUESTION", "OPTION"))
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args(argv)
-    decider = Decider(backend_from(args), permutations=args.orders, workers=args.workers,
-                      parallel_orders=not args.sequential_orders)
+    decider = Decider(backend_from(args), permutations=args.orders if args.orders == "auto" else int(args.orders),
+                      workers=args.workers, parallel_orders=not args.sequential_orders, auto_threshold=args.auto_threshold)
     try:
         run(args, decider)
     except (BackendError, DecisionError) as e:

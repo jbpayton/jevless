@@ -87,7 +87,7 @@ Measured from this machine on 25 September 2026, median per decision on the basi
 - **One order** (`--orders 1`): half the tokens, the same time now that orders run in parallel, and no protection against position bias.
 
 **Not faster:**
-- **Shorter prompts.** Prefilling about 170 tokens is a sliver of the server's 360 ms. Shorter prompts save money, not time.
+- **Shorter prompts.** On the bench items, jevless's own wording is 46 of a median 70 tokens; on a real state of a few hundred tokens it is under a tenth. Prefill is a sliver of the server's 360 ms, so trimming saves money, not time, and it costs accuracy. A lean version (no section labels or instruction line, bare `true`/`false`, levels without `level N:`) was 40% shorter, 105 against 155 billed tokens per decision. It scored lower on all three models tried: gpt-4.1-mini 0.967 → 0.917, gpt-5.4-mini 0.967 → 0.950, gpt-4.1-nano 0.850 → 0.833. The items it lost were the reasoning ones (a discount, a leap-year date, unit prices), and every lost true/false item flipped to "true". So the spelled-out wording stays.
 - **Streaming a readout.** The answer is the first token, so it arrives with the whole response. GPT-5.x adds only a few hidden tokens (462 ms to the answer against 469 ms for the whole reply).
 
 **Not built yet:**

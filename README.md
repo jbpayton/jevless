@@ -15,7 +15,7 @@ It includes a local server that speaks the same `/v1/systemone` request shape, b
 
 ## Results: 32 models, one decision at a time
 
-The same 60 labelled decisions (the `basic` and `hard` sets below) put to every model two API keys could reach, plus a local 9B, on 25 September 2026. **Round trip** is the median time for one request from this machine, network included. A **decision** is two requests, one per option order, made one after the other.
+The same 60 labelled decisions (the `basic` and `hard` sets below) put to every model two API keys could reach, plus a local 9B, on 25 September 2026. **Round trip** is the median time for one request from this machine, network included. A **decision** is two requests, one per option order. In this table they were made one after the other; since v0.4 they go out together, so a decision takes about one round trip (see [Making decisions fast](#making-decisions-fast)).
 
 | Model | Provider | How it decides | Basic | Hard | Round trip | Per decision |
 |---|---|---|---|---|---|---|
@@ -60,8 +60,42 @@ The same 60 labelled decisions (the `basic` and `hard` sets below) put to every 
 - **Most accurate for the time:** gpt-4.1 and gpt-4.1-mini (0.93 at 0.6 s), gpt-5.4 (0.97 at 0.73 s), gpt-5.5 (1.00 at 0.87 s). In answer mode: claude-opus-4-6 (1.00 at 1.3 s) and claude-sonnet-4-6 (0.97 at 1.0 s).
 - **Small models slip on the hard set:** gpt-4o-mini 0.73, gpt-4.1-nano 0.77, gpt-5.4-nano 0.67.
 - **The local 9B** was timed while this machine's GPUs were busy with other benchmarks. Idle, one request on it takes 0.2–0.6 s, and 0.1–0.15 s when the state is already cached (see [measured](#what-its-good-for-measured)).
-- **Halving the time.** `--orders 1` makes one request per decision, but gives up the protection against position bias. Several questions about the same state (`many`) run in parallel.
+- **Faster since.** v0.4 sends both option orders at once and reuses connections, which roughly halves the time per decision (below).
 - **Scale.** Thirty items per set: fine for comparing models on the same footing, not a benchmark result.
+
+## Making decisions fast
+
+Measured from this machine on 25 September 2026, median per decision on the basic set:
+
+| Model | Orders one after the other (v0.3) | Orders in parallel | + connections kept alive (v0.4) |
+|---|---|---|---|
+| gpt-4.1-mini | 1,068 ms | 581 ms | **518 ms** |
+| gpt-5.4-mini | 1,125 ms | 593 ms | **545 ms** |
+| gpt-4.1 | 1,166 ms | 604 ms | **564 ms** |
+| claude-haiku-4-5 (answer mode, streamed) | 1,004 ms | 561 ms | **531 ms** |
+| claude-sonnet-4-6 (answer mode, streamed) | 1,933 ms | 1,042 ms | about 1,050 ms |
+
+**Where the time goes.** For gpt-4.1-mini, a request takes about 430 ms. The server's own processing (`openai-processing-ms`) is 360 ms of that, and a fresh TCP and TLS handshake is 61 ms. With a hosted API, one round trip per decision is the floor, and most of it is the provider's.
+
+**What v0.4 does:**
+- **Both option orders at once.** The two readings don't depend on each other, so they go out together. This halves the time per decision at no cost. `--sequential-orders` turns it off, for a local server with one slot where parallel requests would only queue.
+- **Connections kept alive.** One per thread and host, on long-lived threads, which saves the handshake on every request after the first.
+- **Streaming in answer mode.** Claude Haiku writes its letter at about 400 ms and keeps explaining until about 700 ms. jevless reads the stream and stops at the letter, which saves time and output tokens.
+
+**Available but not the default:**
+- **Priority processing** (`--extra-body '{"service_tier": "priority"}'` on OpenAI): 429 → 390 ms per request for gpt-4.1-mini, 518 → 493 ms for gpt-5.4-mini, at a higher price.
+- **One order** (`--orders 1`): half the tokens, the same time now that orders run in parallel, and no protection against position bias.
+
+**Not faster:**
+- **Shorter prompts.** Prefilling about 170 tokens is a sliver of the server's 360 ms. Shorter prompts save money, not time.
+- **Streaming a readout.** The answer is the first token, so it arrives with the whole response. GPT-5.x adds only a few hidden tokens (462 ms to the answer against 469 ms for the whole reply).
+
+**Not built yet:**
+- **Adaptive second order.** Read one order and ask the second only when the first is unsure. That halves tokens on confident decisions, at one extra round trip on unsure ones.
+- **Packing questions.** Several questions about one state in one request, with a readout at each answer position. The state is sent once, which saves tokens and requests against rate limits. Later answers would see the earlier ones, so this needs measuring first.
+- **Prompt caching for long states.** OpenAI caches prompts of 1,024 tokens or more on its own (jevless already puts the state first); Anthropic needs `cache_control`. This matters for long states such as a memory gate over several recalled passages.
+- **A decision cache.** The same state and question should not be asked twice.
+- **Local models.** They have the lowest floor. A 9B on this machine answers in 0.2–0.6 s cold, and in 0.11–0.15 s when the state is already cached, with no network at all.
 
 ## Quick start
 

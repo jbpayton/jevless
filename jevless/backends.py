@@ -5,14 +5,14 @@ Every backend implements ``first_token(prompt, top_k) -> (tops, input_tokens)`` 
 """
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
-from typing import Dict, List, Optional, Tuple
+import urllib.parse
+from typing import Dict, Iterator, List, Optional, Tuple
 
 Tops = List[Tuple[str, float]]
 
@@ -23,32 +23,97 @@ class BackendError(RuntimeError):
 
 class _HTTP:
     """``key_header``: where the key goes. "Authorization" (the default) sends ``Bearer <key>``; any other name sends
-    the key as is (Azure OpenAI uses ``api-key``). ``headers``: extra headers for every request."""
+    the key as is (Azure OpenAI uses ``api-key``). ``headers``: extra headers for every request.
+
+    Connections are kept alive, one per thread and host, so a decision doesn't pay a new TLS handshake per request.
+    A connection the server has closed while idle is reopened once, transparently."""
+
+    _STALE = (http.client.RemoteDisconnected, http.client.CannotSendRequest, ConnectionResetError, BrokenPipeError)
 
     def __init__(self, url: str, api_key: Optional[str] = None, timeout: float = 60.0, retries: int = 2,
                  key_header: str = "Authorization", headers: Optional[Dict[str, str]] = None):
         self.url, self.api_key, self.timeout, self.retries = url.rstrip("/"), api_key, timeout, retries
         self.key_header, self.headers = key_header, dict(headers or {})
+        self._local = threading.local()
 
-    def post(self, path: str, body: dict) -> dict:
+    def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json", **self.headers}
         if self.api_key:
             bearer = self.key_header.lower() == "authorization"
             headers[self.key_header] = f"Bearer {self.api_key}" if bearer else self.api_key
+        return headers
+
+    def _conn(self, scheme: str, netloc: str, fresh: bool = False):
+        pool = self._local.__dict__.setdefault("pool", {})
+        if fresh:
+            self._drop(scheme, netloc)
+        if (scheme, netloc) not in pool:
+            cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+            pool[(scheme, netloc)] = cls(netloc, timeout=self.timeout)
+        return pool[(scheme, netloc)]
+
+    def _drop(self, scheme: str, netloc: str) -> None:
+        c = self._local.__dict__.setdefault("pool", {}).pop((scheme, netloc), None)
+        if c:
+            c.close()
+
+    def _send(self, path: str, body: dict):
+        u = urllib.parse.urlsplit(self.url + path)
+        target = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        data = json.dumps(body).encode()
+        for fresh in (False, True):
+            conn = self._conn(u.scheme, u.netloc, fresh)
+            try:
+                conn.request("POST", target, body=data, headers=self._headers())
+                return conn.getresponse(), u
+            except self._STALE:
+                self._drop(u.scheme, u.netloc)
+                if fresh:
+                    raise
+            except Exception:
+                self._drop(u.scheme, u.netloc)
+                raise
+
+    def _response(self, path: str, body: dict):
+        """A successful response (retrying overload and server errors, not client errors)."""
         for attempt in range(self.retries + 1):
             try:
-                req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), headers=headers)
-                with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                    return json.loads(r.read())
-            except urllib.error.HTTPError as e:          # retry overload and server errors, not client errors
-                detail = e.read()[:300].decode("utf-8", "replace")
-                if (e.code < 500 and e.code != 429) or attempt == self.retries:
-                    raise BackendError(f"{path} HTTP {e.code}: {detail}") from e
+                r, u = self._send(path, body)
             except Exception as e:
                 if attempt == self.retries:
                     raise BackendError(f"{path}: {e}") from e
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if r.status < 400:
+                return r, u
+            detail = r.read()[:300].decode("utf-8", "replace")
+            if (r.status < 500 and r.status != 429) or attempt == self.retries:
+                raise BackendError(f"{path} HTTP {r.status}: {detail}")
             time.sleep(1.5 * (attempt + 1))
         raise BackendError("unreachable")
+
+    def post(self, path: str, body: dict) -> dict:
+        r, u = self._response(path, body)
+        try:
+            return json.loads(r.read())
+        except Exception as e:
+            self._drop(u.scheme, u.netloc)
+            raise BackendError(f"{path}: {e}") from e
+
+    def stream(self, path: str, body: dict) -> Iterator[dict]:
+        """Server-sent events as dicts. Stop early by closing the generator; the connection is then discarded,
+        since a half-read stream can't be reused."""
+        r, u = self._response(path, {**body, "stream": True})
+        try:
+            for line in r:
+                line = line.strip()
+                if line.startswith(b"data:"):
+                    data = line[5:].strip()
+                    if data == b"[DONE]":
+                        return
+                    yield json.loads(data)
+        finally:
+            self._drop(u.scheme, u.netloc)
 
 
 class OpenAIChat(_HTTP):
@@ -65,9 +130,12 @@ class OpenAIChat(_HTTP):
     ``top_logprobs`` drops to the model's cap, ``temperature`` is left out, and reasoning is switched off."""
 
     def __init__(self, model: str, url: str = "https://api.openai.com", api_key: Optional[str] = None,
-                 thinking: Optional[str] = None, reasoning_effort: Optional[str] = None, **kw):
+                 thinking: Optional[str] = None, reasoning_effort: Optional[str] = None,
+                 extra_body: Optional[Dict] = None, **kw):
+        """``extra_body``: more request fields, sent as they are (e.g. {"service_tier": "priority"})."""
         super().__init__(url, api_key, **kw)
         self.model, self.thinking, self.reasoning_effort = model, thinking, reasoning_effort
+        self.extra_body = dict(extra_body or {})
         self.max_key, self.max_value = "max_tokens", 1
         self.top_cap: Optional[int] = None
         self.send_temperature = True
@@ -87,6 +155,7 @@ class OpenAIChat(_HTTP):
             body["reasoning_effort"] = self.reasoning_effort
         if self.thinking == "off":
             body["chat_template_kwargs"] = {"enable_thinking": False}
+        body.update(self.extra_body)
         return body
 
     def _adapt(self, msg: str) -> bool:
@@ -162,11 +231,13 @@ class Anthropic(_HTTP):
     _SAID = re.compile(r"(?i:answer|option|choice)\W{0,4}(?:(?i:is)\W{0,4})?\(?([A-Z])\b(?!\w)")
 
     def __init__(self, model: str, url: str = "https://api.anthropic.com", api_key: Optional[str] = None,
-                 samples: int = 1, max_tokens: int = 2048, version: str = "2023-06-01", **kw):
+                 samples: int = 1, max_tokens: int = 2048, version: str = "2023-06-01", stream: bool = True, **kw):
+        """``stream``: read the reply as it is written and stop as soon as it opens with a letter on its own line,
+        instead of waiting for any explanation after it."""
         kw.setdefault("key_header", "x-api-key")
         kw.setdefault("headers", {"anthropic-version": version})
         super().__init__(url, api_key, **kw)
-        self.model, self.samples, self.max_tokens = model, max(1, int(samples)), max_tokens
+        self.model, self.samples, self.max_tokens, self.stream_replies = model, max(1, int(samples)), max_tokens, stream
         self.send_temperature = True               # the newest models refuse it
         self.thinking: Optional[dict] = {"thinking": {"type": "disabled"}}
         self._lock = threading.Lock()
@@ -194,16 +265,40 @@ class Anthropic(_HTTP):
             return True
         return False
 
-    def _post(self, prompt: str) -> dict:
+    def _call(self, prompt: str) -> Tuple[str, int]:
         for _ in range(5):
             body = self._body(prompt)
             try:
-                return self.post("/v1/messages", body)
+                return self._reply(body) if self.stream_replies else self._whole(body)
             except BackendError as e:
                 with self._lock:
                     if self._body(prompt) == body and not self._adapt(str(e)):
                         raise
         raise BackendError("the server kept refusing the request")
+
+    def _whole(self, body: dict) -> Tuple[str, int]:
+        r = self.post("/v1/messages", body)
+        text = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+        return text, int((r.get("usage") or {}).get("input_tokens") or 0)
+
+    def _reply(self, body: dict) -> Tuple[str, int]:
+        text, tokens = "", 0
+        events = self.stream("/v1/messages", body)
+        try:
+            for ev in events:
+                kind = ev.get("type")
+                if kind == "message_start":
+                    tokens = int(((ev.get("message") or {}).get("usage") or {}).get("input_tokens") or 0)
+                elif kind == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
+                    text += ev["delta"].get("text", "")
+                    head = text.lstrip()
+                    if "\n" in head and self._LINE.match(head.split("\n", 1)[0]):
+                        break                               # the answer is in: skip the explanation
+                elif kind == "error":
+                    raise BackendError(f"stream error: {ev.get('error')}")
+        finally:
+            events.close()
+        return text, tokens
 
     @classmethod
     def letter(cls, text: str) -> Optional[str]:
@@ -225,12 +320,10 @@ class Anthropic(_HTTP):
         counts: Dict[str, int] = {}
         tokens = 0
         for _ in range(self.samples):
-            r = self._post(prompt)
-            text = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+            text, tokens = self._call(prompt)
             got = self.letter(text)
             if got:
                 counts[got] = counts.get(got, 0) + 1
-            tokens = int((r.get("usage") or {}).get("input_tokens") or 0)
         if not counts:
             raise BackendError(f"no answer letter in the reply: {text[:120]!r}")
         return [(t, math.log(c / self.samples)) for t, c in sorted(counts.items(), key=lambda kv: -kv[1])], tokens

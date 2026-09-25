@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -156,8 +157,13 @@ class Decider:
     """decide = Decider(LMStudio("qwen/qwen3.5-9b")); decide.noul(state, "The customer is asking for a refund.")"""
 
     def __init__(self, backend, *, permutations: int = 2, temperatures: Optional[Dict[str, float]] = None,
-                 top_k: int = 20, workers: int = 4, log: Optional[Callable[[Dict[str, Any]], None]] = None):
-        self.backend = backend
+                 top_k: int = 20, workers: int = 4, log: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 parallel_orders: bool = True):
+        """``parallel_orders``: send the two option orders at once (one round trip per decision instead of two).
+        Switch it off for a local server with a single slot, where parallel requests only queue."""
+        self.backend, self.parallel_orders = backend, parallel_orders
+        self._pools: Dict[str, ThreadPoolExecutor] = {}
+        self._pools_lock = threading.Lock()
         self.permutations = max(1, min(2, permutations))
         self.temperatures = {"choice": 1.0, "noul": 1.0, "score": 1.0, **(temperatures or {})}
         self.top_k, self.workers, self.log = top_k, workers, log
@@ -171,10 +177,17 @@ class Decider:
         orders = [list(range(k))] + ([list(range(k))[::-1]] if perms == 2 else [])
         state_text, instructions = _text(state), _text(q.instructions)
         t0 = time.perf_counter()
+
+        def read(order):
+            return self.backend.first_token(render(state_text, instructions, [descs[i] for i in order], qtype),
+                                            max(self.top_k, k))
+
+        if len(orders) > 1 and self.parallel_orders:          # the orders don't depend on each other
+            readings = list(self._pool("orders").map(read, orders))
+        else:
+            readings = [read(o) for o in orders]
         per_order, raws, tokens = [], [], 0
-        for order in orders:
-            tops, n_in = self.backend.first_token(render(state_text, instructions, [descs[i] for i in order], qtype),
-                                                  max(self.top_k, k))
+        for order, (tops, n_in) in zip(orders, readings):
             tokens += n_in
             letter_lp: Dict[str, float] = {}
             for tok, lp in tops:
@@ -206,6 +219,15 @@ class Decider:
                 pass
         return ans
 
+    def _pool(self, name: str) -> ThreadPoolExecutor:
+        """Long-lived threads: backends keep one connection alive per thread, so reuse needs threads that stay.
+        Questions and option orders get separate pools, so a question never waits on its own orders' slots."""
+        with self._pools_lock:
+            if name not in self._pools:
+                n = max(1, self.workers) * (2 if name == "orders" else 1)
+                self._pools[name] = ThreadPoolExecutor(max_workers=n, thread_name_prefix=f"jevless-{name}")
+            return self._pools[name]
+
     def noul(self, state: Text, instructions: Text, criteria: Optional[Mapping[str, str]] = None, **kw) -> Answer:
         return self.ask(state, Noul(instructions, criteria), **kw)
 
@@ -218,8 +240,7 @@ class Decider:
     def many(self, state: Text, questions: Mapping[str, Question]) -> Dict[str, Answer]:
         """Several questions about one state, in parallel (the shared state prefix is cached by most servers)."""
         items = list(questions.items())
-        with ThreadPoolExecutor(max_workers=max(1, self.workers)) as ex:
-            answers = list(ex.map(lambda kv: self.ask(state, kv[1]), items))
+        answers = list(self._pool("questions").map(lambda kv: self.ask(state, kv[1]), items))
         return {k: a for (k, _), a in zip(items, answers)}
 
     def system_one(self, request: Mapping[str, Any]) -> Dict[str, Any]:

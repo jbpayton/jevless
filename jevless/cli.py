@@ -48,6 +48,7 @@ def backend_from(args):
     if args.backend == "openai":
         return OpenAIChat(args.model, url=args.url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com",
                           api_key=key, thinking=args.thinking, reasoning_effort=args.reasoning_effort,
+                          extra_body=json.loads(args.extra_body) if args.extra_body else None,
                           key_header=args.key_header,
                           headers=_headers(args.header))
     if args.backend == "lmstudio":
@@ -69,6 +70,10 @@ def main(argv=None):
     ap.add_argument("--api-key", default="", help="the key itself (visible in the process list; prefer --api-key-env)")
     ap.add_argument("--api-key-env", default="", metavar="NAME",
                     help="environment variable holding the key (default OPENAI_API_KEY, or ANTHROPIC_API_KEY for anthropic)")
+    ap.add_argument("--extra-body", default="", metavar="JSON",
+                    help='openai: more request fields, e.g. \'{"service_tier": "priority"}\'')
+    ap.add_argument("--sequential-orders", action="store_true",
+                    help="send the two option orders one after the other (for a local server with one slot)")
     ap.add_argument("--samples", type=int, default=1,
                     help="anthropic: answers per option order (no logprobs there; >1 samples at temperature 1)")
     ap.add_argument("--key-header", default="Authorization",
@@ -88,7 +93,8 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args(argv)
-    decider = Decider(backend_from(args), permutations=args.orders, workers=args.workers)
+    decider = Decider(backend_from(args), permutations=args.orders, workers=args.workers,
+                      parallel_orders=not args.sequential_orders)
     try:
         run(args, decider)
     except (BackendError, DecisionError) as e:

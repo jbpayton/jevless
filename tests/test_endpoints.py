@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -148,11 +149,27 @@ def test_anthropic_answers_only():
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             seen.append(({k.lower(): v for k, v in self.headers.items()}, body, self.path))
             first = re.search(r"^([A-Z])\) true", body["messages"][0]["content"], re.M).group(1)   # always says "true"
-            data = json.dumps({"content": [{"type": "text", "text": first}], "usage": {"input_tokens": 30}}).encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(data)))
+            if not body.get("stream"):
+                data = json.dumps({"content": [{"type": "text", "text": first}], "usage": {"input_tokens": 30}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            self.send_response(200)                         # the letter, then a slow explanation
+            self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            self.wfile.write(data)
+            events = [{"type": "message_start", "message": {"usage": {"input_tokens": 30}}},
+                      {"type": "content_block_delta", "delta": {"type": "text_delta", "text": first + "\n\n"}}]
+            events += [{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "because... "}}] * 5
+            try:
+                for i, ev in enumerate(events):
+                    if i > 1:
+                        time.sleep(0.2)
+                    self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, *a):
             pass
@@ -161,13 +178,17 @@ def test_anthropic_answers_only():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         be = Anthropic("claude-x", url=f"http://127.0.0.1:{srv.server_address[1]}", api_key="ak")
+        t = time.perf_counter()
         a = Decider(be).noul("s", "q")
+        assert time.perf_counter() - t < 0.6                 # stopped at the letter, not after the explanation
         h, body, path = seen[-1]
         assert path == "/v1/messages" and h["x-api-key"] == "ak" and h["anthropic-version"] and "logprobs" not in body
         assert a.noul > 0.9 and not a.flip
         r = bench.run(Decider(be), [{"type": "noul", "state": "s", "instructions": "q", "gold": True}])
         assert r["overall"]["accuracy"] == 1.0 and r["overall"]["log_loss"] is None and r["readout"] == "answer"
         assert "answer mode" in bench.report(r)
+        whole = Anthropic("claude-x", url=f"http://127.0.0.1:{srv.server_address[1]}", api_key="ak", stream=False)
+        assert Decider(whole).noul("s", "q").noul > 0.9
     finally:
         srv.shutdown()
 
@@ -179,3 +200,43 @@ def test_anthropic_answers_only():
 def test_anthropic_letter_parsing(reply, letter):
     from jevless import Anthropic
     assert Anthropic.letter(reply) == letter
+
+
+def test_connections_are_kept_alive():
+    ports = []
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"                    # persistent connections
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            ports.append(self.client_address[1])
+            data = json.dumps({"choices": [{"logprobs": {"content": [{"token": "A", "logprob": -0.1,
+                              "top_logprobs": [{"token": "A", "logprob": -0.1}, {"token": "B", "logprob": -2.0}]}]}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        d = Decider(OpenAIChat("m", url=f"http://127.0.0.1:{srv.server_address[1]}"), permutations=1)
+        for _ in range(4):
+            d.noul("s", "q")
+        assert len(ports) == 4 and len(set(ports)) == 1
+        ports.clear()                                    # both orders in parallel: still a few long-lived connections
+        d2 = Decider(OpenAIChat("m", url=f"http://127.0.0.1:{srv.server_address[1]}"), workers=1)
+        for _ in range(6):
+            d2.noul("s", "q")
+        assert len(ports) == 12 and len(set(ports)) <= 2
+    finally:
+        srv.shutdown()
+
+
+def test_extra_body_is_sent(stub):
+    Decider(OpenAIChat("m", url=stub.root, extra_body={"service_tier": "priority"}), permutations=1).noul("s", "q")
+    assert stub.seen[-1]["body"]["service_tier"] == "priority"

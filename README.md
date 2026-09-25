@@ -33,7 +33,7 @@ decide.many(state, {"urgent": Noul("..."), "team": Choice("...", {...})})    # s
 Or as a service:
 
 ```bash
-pip install jevless
+pip install git+https://github.com/jbpayton/jevless
 jevless probe --backend lmstudio --model qwen/qwen3.5-9b      # sanity-check a model before relying on it
 jevless serve --backend lmstudio --model qwen/qwen3.5-9b --port 8765
 
@@ -81,6 +81,8 @@ These numbers come from building [hermes-sophia](https://github.com/jbpayton/her
 - **Model size matters.** A Qwen3.5-0.8B waved an off-topic question through a relevance check at 0.90, where the 9B said 0.45. `jevless probe` catches this kind of model before you rely on it.
 
 ## Limits
+
+jevless is a thin approximation of Jev: an ordinary model and a readout, with no purpose-trained decision head and no calibration out of the box. For routing, gating and triage with a decent model that is often good enough. At worst, it shows how the technique works in about 500 lines of Python.
 
 - **Up to 26 options per question** (single letters); Jev allows 255.
 - **Probabilities are uncalibrated** until you fit temperatures from your own labelled decisions.

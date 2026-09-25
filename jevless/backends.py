@@ -6,6 +6,9 @@ Every backend implements ``first_token(prompt, top_k) -> (tops, input_tokens)`` 
 from __future__ import annotations
 
 import json
+import math
+import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -49,37 +52,75 @@ class _HTTP:
 
 
 class OpenAIChat(_HTTP):
-    """Any OpenAI-compatible chat completions endpoint that returns logprobs: OpenAI (non-reasoning models), vLLM,
-    llama.cpp's llama-server, SGLang, and hosted providers that pass logprobs through.
+    """Any OpenAI-compatible chat completions endpoint that returns logprobs: OpenAI, vLLM, llama.cpp's llama-server,
+    SGLang, and hosted providers that pass logprobs through.
 
     ``url`` may be the server root (``https://api.openai.com``), a base URL ending in ``/v1`` (what most SDKs call
     base_url), or the full ``.../chat/completions`` URL, query string included (Azure OpenAI).
-    ``thinking="off"`` sends chat_template_kwargs {enable_thinking: false} (Qwen3-style templates on vLLM/llama-server)."""
+    ``thinking="off"`` sends chat_template_kwargs {enable_thinking: false} (Qwen3-style templates on vLLM/llama-server).
+    ``reasoning_effort="none"`` is what OpenAI's GPT-5.1-and-later models need before they return logprobs.
+
+    Newer OpenAI models refuse some of the classic parameters. Each refusal is read from the error message, adapted to
+    once, and remembered: ``max_tokens`` becomes ``max_completion_tokens`` (with room for their few hidden tokens),
+    ``top_logprobs`` drops to the model's cap, ``temperature`` is left out, and reasoning is switched off."""
 
     def __init__(self, model: str, url: str = "https://api.openai.com", api_key: Optional[str] = None,
-                 thinking: Optional[str] = None, **kw):
+                 thinking: Optional[str] = None, reasoning_effort: Optional[str] = None, **kw):
         super().__init__(url, api_key, **kw)
-        self.model, self.thinking = model, thinking
-        self.max_key = "max_tokens"             # newer OpenAI models want max_completion_tokens; switched on refusal
+        self.model, self.thinking, self.reasoning_effort = model, thinking, reasoning_effort
+        self.max_key, self.max_value = "max_tokens", 1
+        self.top_cap: Optional[int] = None
+        self.send_temperature = True
+        self._lock = threading.Lock()
 
     def endpoint(self) -> str:
         if "/chat/completions" in self.url:
             return ""
         return "/chat/completions" if self.url.endswith("/v1") else "/v1/chat/completions"
 
-    def first_token(self, prompt: str, top_k: int = 20) -> Tuple[Tops, int]:
-        body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], self.max_key: 1,
-                "temperature": 0, "logprobs": True, "top_logprobs": min(int(top_k), 20)}
+    def _body(self, prompt: str, top_k: int) -> dict:
+        body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], self.max_key: self.max_value,
+                "logprobs": True, "top_logprobs": min(int(top_k), 20, self.top_cap or 20)}
+        if self.send_temperature:
+            body["temperature"] = 0
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         if self.thinking == "off":
             body["chat_template_kwargs"] = {"enable_thinking": False}
-        try:
-            r = self.post(self.endpoint(), body)
-        except BackendError as e:
-            if self.max_key != "max_tokens" or "max_completion_tokens" not in str(e):
-                raise
-            self.max_key = "max_completion_tokens"
-            body[self.max_key] = body.pop("max_tokens")
-            r = self.post(self.endpoint(), body)
+        return body
+
+    def _adapt(self, msg: str) -> bool:
+        """Adjust to a refusal; False when there is nothing left to try."""
+        if "max_completion_tokens" in msg and self.max_key == "max_tokens":
+            self.max_key, self.max_value = "max_completion_tokens", 16
+            return True
+        cap = re.search(r"top_logprobs.{0,40}?less than or equal to (\d+)", msg)
+        if cap and self.top_cap is None:
+            self.top_cap = int(cap.group(1))
+            return True
+        if "temperature" in msg and self.send_temperature:
+            self.send_temperature = False
+            return True
+        if ("output limit" in msg or "logprobs" in msg) and self.reasoning_effort is None:
+            self.reasoning_effort = "none"
+            return True
+        if "output limit" in msg and self.max_value < 64:
+            self.max_value *= 4
+            return True
+        return False
+
+    def first_token(self, prompt: str, top_k: int = 20) -> Tuple[Tops, int]:
+        for _ in range(6):
+            body = self._body(prompt, top_k)
+            try:
+                r = self.post(self.endpoint(), body)
+                break
+            except BackendError as e:
+                with self._lock:                    # parallel requests meet the same refusal: adapt once
+                    if self._body(prompt, top_k) == body and not self._adapt(str(e)):
+                        raise
+        else:
+            raise BackendError("the server kept refusing the request")
         try:
             first = r["choices"][0]["logprobs"]["content"][0]
         except (KeyError, IndexError, TypeError) as e:
@@ -106,6 +147,93 @@ class LMStudio(_HTTP):
         first = msgs[0]["content"][0]["logprobs"][0]
         return [(t["token"], float(t["logprob"])) for t in first.get("top_logprobs", [])], \
             int((r.get("usage") or {}).get("input_tokens") or 0)
+
+
+class Anthropic(_HTTP):
+    """Anthropic's Messages API. It returns no log-probabilities, so this backend reports the answer the model gives:
+    one reply per option order, with the answer letter taken from the reply. Recent Claude models reason before they
+    answer (adaptive thinking, which the newest can't switch off), so the reply may include reasoning: thinking is
+    switched off where the model allows it, and otherwise set to its lowest effort. This is a different mode from the
+    one-token logprob readout, slower and not calibrated: the probabilities are just the answer (``readout`` says so).
+    ``samples`` > 1 asks several times at the default temperature and uses the answer frequencies."""
+
+    readout = "answer"
+    _LINE = re.compile(r"^\W*([A-Z])\W*$")
+    _SAID = re.compile(r"(?i:answer|option|choice)\W{0,4}(?:(?i:is)\W{0,4})?\(?([A-Z])\b(?!\w)")
+
+    def __init__(self, model: str, url: str = "https://api.anthropic.com", api_key: Optional[str] = None,
+                 samples: int = 1, max_tokens: int = 2048, version: str = "2023-06-01", **kw):
+        kw.setdefault("key_header", "x-api-key")
+        kw.setdefault("headers", {"anthropic-version": version})
+        super().__init__(url, api_key, **kw)
+        self.model, self.samples, self.max_tokens = model, max(1, int(samples)), max_tokens
+        self.send_temperature = True               # the newest models refuse it
+        self.thinking: Optional[dict] = {"thinking": {"type": "disabled"}}
+        self._lock = threading.Lock()
+
+    def _body(self, prompt: str) -> dict:
+        body = {"model": self.model, "max_tokens": self.max_tokens, "messages": [{"role": "user", "content": prompt}],
+                **(self.thinking or {})}
+        if self.send_temperature and self.samples == 1:
+            body["temperature"] = 0
+        return body
+
+    def _adapt(self, msg: str) -> bool:
+        if "temperature" in msg and self.send_temperature:
+            self.send_temperature = False
+            return True
+        if "thinking" in msg and self.thinking and self.thinking["thinking"]["type"] == "disabled":
+            self.thinking = ({"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
+                             if "adaptive" in msg else None)
+            return True
+        if "effort" in msg and self.thinking and "output_config" in self.thinking:
+            self.thinking = {"thinking": {"type": "adaptive"}}
+            return True
+        if "thinking" in msg and self.thinking:
+            self.thinking = None
+            return True
+        return False
+
+    def _post(self, prompt: str) -> dict:
+        for _ in range(5):
+            body = self._body(prompt)
+            try:
+                return self.post("/v1/messages", body)
+            except BackendError as e:
+                with self._lock:
+                    if self._body(prompt) == body and not self._adapt(str(e)):
+                        raise
+        raise BackendError("the server kept refusing the request")
+
+    @classmethod
+    def letter(cls, text: str) -> Optional[str]:
+        """The answer letter in a reply: a reply that is just the letter, else an 'answer is X', else the last line
+        that is only a letter."""
+        text = text.strip()
+        if cls._LINE.match(text.split("\n", 1)[0]):
+            return cls._LINE.match(text.split("\n", 1)[0]).group(1)
+        said = cls._SAID.findall(text)
+        if said:
+            return said[-1]
+        for line in reversed(text.splitlines()):
+            m = cls._LINE.match(line)
+            if m:
+                return m.group(1)
+        return None
+
+    def first_token(self, prompt: str, top_k: int = 20) -> Tuple[Tops, int]:
+        counts: Dict[str, int] = {}
+        tokens = 0
+        for _ in range(self.samples):
+            r = self._post(prompt)
+            text = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+            got = self.letter(text)
+            if got:
+                counts[got] = counts.get(got, 0) + 1
+            tokens = int((r.get("usage") or {}).get("input_tokens") or 0)
+        if not counts:
+            raise BackendError(f"no answer letter in the reply: {text[:120]!r}")
+        return [(t, math.log(c / self.samples)) for t, c in sorted(counts.items(), key=lambda kv: -kv[1])], tokens
 
 
 class LlamaCpp(_HTTP):

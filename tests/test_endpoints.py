@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -10,7 +11,7 @@ from jevless.cli import main
 
 class Stub:
     """An OpenAI-compatible chat endpoint that answers 'A' and records what it was sent."""
-    def __init__(self, want_completion_tokens=False):
+    def __init__(self, want_completion_tokens=False, gpt5=False):
         self.seen = []
         stub = self
 
@@ -19,9 +20,17 @@ class Stub:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 stub.seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
                                   "body": body})
-                if want_completion_tokens and "max_tokens" in body:
-                    data = json.dumps({"error": {"message": "Unsupported parameter: 'max_tokens'. "
-                                                            "Use 'max_completion_tokens' instead."}}).encode()
+                refusal = None
+                if (want_completion_tokens or gpt5) and "max_tokens" in body:
+                    refusal = "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+                elif gpt5 and body.get("top_logprobs", 0) > 5:
+                    refusal = "Invalid value for 'top_logprobs': must be less than or equal to 5."
+                elif gpt5 and "temperature" in body:
+                    refusal = "Unsupported value: 'temperature' does not support 0 with this model."
+                elif gpt5 and body.get("reasoning_effort") != "none":
+                    refusal = "Could not finish the message because max_tokens or model output limit was reached."
+                if refusal:
+                    data = json.dumps({"error": {"message": refusal}}).encode()
                     self.send_response(400)
                 else:
                     data = json.dumps({"choices": [{"logprobs": {"content": [{"token": "A", "logprob": -0.1,
@@ -73,7 +82,7 @@ def test_max_completion_tokens_fallback():
     try:
         be = OpenAIChat("m", url=s.root)
         Decider(be, permutations=1).noul("s", "q")
-        assert be.max_key == "max_completion_tokens" and s.seen[-1]["body"]["max_completion_tokens"] == 1
+        assert be.max_key == "max_completion_tokens" and s.seen[-1]["body"]["max_completion_tokens"] == 16
     finally:
         s.close()
 
@@ -98,4 +107,75 @@ def test_bench_scores_and_reports():
     r = bench.run(Decider(Always(), permutations=1), items)
     assert r["overall"]["n"] == 2 and r["overall"]["accuracy"] == 0.5
     assert "miss [choice]" in bench.report(r)
-    assert len(bench.BUILTIN) == 30 and all(bench._gold(i) for i in bench.BUILTIN)
+    for items in (bench.BUILTIN, bench.HARD):
+        assert len(items) == 30 and all(bench._gold(i) for i in items)
+        for it in items:                                # every gold answer is one of its options
+            from jevless.core import _options, question_from_wire
+            assert bench._gold(it) in _options(question_from_wire(it))[0]
+
+
+def test_adapts_to_gpt5_style_refusals():
+    s = Stub(gpt5=True)
+    try:
+        be = OpenAIChat("m", url=s.root)
+        a = Decider(be, permutations=1).noul("s", "q")
+        body = s.seen[-1]["body"]
+        assert a.probabilities and body["max_completion_tokens"] == 16 and body["top_logprobs"] == 5
+        assert "temperature" not in body and body["reasoning_effort"] == "none"
+        n = len(s.seen)
+        Decider(be, permutations=1).noul("s", "q")               # remembered: one request, no refusals
+        assert len(s.seen) == n + 1
+    finally:
+        s.close()
+
+
+def test_parallel_requests_adapt_once():
+    s = Stub(gpt5=True)
+    try:
+        items = [{"type": "noul", "state": f"s{i}", "instructions": "q", "gold": True} for i in range(12)]
+        r = bench.run(Decider(OpenAIChat("m", url=s.root)), items, workers=8)
+        assert r["overall"]["errors"] == 0
+    finally:
+        s.close()
+
+
+def test_anthropic_answers_only():
+    from jevless import Anthropic
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(({k.lower(): v for k, v in self.headers.items()}, body, self.path))
+            first = re.search(r"^([A-Z])\) true", body["messages"][0]["content"], re.M).group(1)   # always says "true"
+            data = json.dumps({"content": [{"type": "text", "text": first}], "usage": {"input_tokens": 30}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        be = Anthropic("claude-x", url=f"http://127.0.0.1:{srv.server_address[1]}", api_key="ak")
+        a = Decider(be).noul("s", "q")
+        h, body, path = seen[-1]
+        assert path == "/v1/messages" and h["x-api-key"] == "ak" and h["anthropic-version"] and "logprobs" not in body
+        assert a.noul > 0.9 and not a.flip
+        r = bench.run(Decider(be), [{"type": "noul", "state": "s", "instructions": "q", "gold": True}])
+        assert r["overall"]["accuracy"] == 1.0 and r["overall"]["log_loss"] is None and r["readout"] == "answer"
+        assert "answer mode" in bench.report(r)
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("reply,letter", [("B", "B"), ("  **C**\n\nbecause", "C"), ("36 + 16 = 52.\n\nAnswer: B", "B"),
+                                          ("The answer is (A).", "A"), ("Let me think.\nIt holds.\nB", "B"),
+                                          ("I need to calculate the total", None),
+                                          ("The answer is a bit subtle.\n\nB", "B")])
+def test_anthropic_letter_parsing(reply, letter):
+    from jevless import Anthropic
+    assert Anthropic.letter(reply) == letter

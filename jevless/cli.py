@@ -1,7 +1,7 @@
 """jevless command line.
 
   jevless probe --backend lmstudio --model qwen/qwen3.5-9b          # does this model/server give usable readouts?
-  jevless bench --backend openai --model gpt-4.1-mini              # accuracy and calibration on 30 labelled decisions
+  jevless bench --backend openai --model gpt-4.1-mini --set hard   # accuracy and calibration on labelled decisions
   jevless ask --backend openai --model gpt-4.1-mini --state "The API returns 503 since the deploy." \\
       --choice "Which team should own this?" billing infra sales
   jevless serve --backend lmstudio --model qwen/qwen3.5-9b --port 8765
@@ -11,7 +11,8 @@ Any OpenAI-compatible server, with the key read from the environment variable yo
   jevless bench --backend openai --url https://llm.example.com/v1 --model my-model --api-key-env MY_LLM_KEY
 
 --url defaults to $OPENAI_BASE_URL, then https://api.openai.com. The key comes from --api-key-env (default
-OPENAI_API_KEY); --api-key puts it on the command line instead, where other users on the machine can see it.
+OPENAI_API_KEY, or ANTHROPIC_API_KEY with --backend anthropic); --api-key puts it on the command line instead, where
+other users on the machine can see it. Anthropic's API has no logprobs: that backend reports answers only.
 """
 from __future__ import annotations
 
@@ -33,13 +34,21 @@ def _headers(pairs):
     return out
 
 
+DEFAULT_KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+
+
 def backend_from(args):
+    env = args.api_key_env or DEFAULT_KEY_ENV.get(args.backend, "")
+    key = args.api_key or (os.environ.get(env) if env else None)
+    if args.api_key_env and not key:
+        raise SystemExit(f"jevless: ${args.api_key_env} is not set")
+    if args.backend == "anthropic":
+        from . import Anthropic
+        return Anthropic(args.model, url=args.url or "https://api.anthropic.com", api_key=key, samples=args.samples)
     if args.backend == "openai":
-        key = args.api_key or os.environ.get(args.api_key_env)
-        if args.api_key_env != "OPENAI_API_KEY" and not key:
-            raise SystemExit(f"jevless: ${args.api_key_env} is not set")
         return OpenAIChat(args.model, url=args.url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com",
-                          api_key=key, thinking=args.thinking, key_header=args.key_header,
+                          api_key=key, thinking=args.thinking, reasoning_effort=args.reasoning_effort,
+                          key_header=args.key_header,
                           headers=_headers(args.header))
     if args.backend == "lmstudio":
         return LMStudio(args.model, url=args.url or "http://127.0.0.1:1234")
@@ -54,18 +63,24 @@ def backend_from(args):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="jevless", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["probe", "bench", "ask", "serve"])
-    ap.add_argument("--backend", default="openai", choices=["openai", "lmstudio", "llamacpp", "transformers"])
+    ap.add_argument("--backend", default="openai", choices=["openai", "anthropic", "lmstudio", "llamacpp", "transformers"])
     ap.add_argument("--model", default="")
     ap.add_argument("--url", default="")
     ap.add_argument("--api-key", default="", help="the key itself (visible in the process list; prefer --api-key-env)")
-    ap.add_argument("--api-key-env", default="OPENAI_API_KEY", metavar="NAME", help="environment variable holding the key")
+    ap.add_argument("--api-key-env", default="", metavar="NAME",
+                    help="environment variable holding the key (default OPENAI_API_KEY, or ANTHROPIC_API_KEY for anthropic)")
+    ap.add_argument("--samples", type=int, default=1,
+                    help="anthropic: answers per option order (no logprobs there; >1 samples at temperature 1)")
     ap.add_argument("--key-header", default="Authorization",
                     help="header for the key: Authorization sends 'Bearer <key>', any other name the bare key (Azure: api-key)")
     ap.add_argument("--header", action="append", metavar="'NAME: VALUE'", help="extra request header (repeatable)")
     ap.add_argument("--file", default="", help="bench: your own labelled decisions, JSONL (see jevless.bench)")
+    ap.add_argument("--set", default="basic", choices=["basic", "hard", "all"], help="bench: which built-in set")
     ap.add_argument("--out", default="", help="bench: write every decision and the summary as JSON")
     ap.add_argument("--workers", type=int, default=4, help="parallel requests")
     ap.add_argument("--thinking", default=None, choices=[None, "off"], help="off: disable Qwen3-style thinking")
+    ap.add_argument("--reasoning-effort", default=None,
+                    help="sent as reasoning_effort (OpenAI GPT-5.1+ need 'none' for logprobs; set automatically if refused)")
     ap.add_argument("--orders", type=int, default=2, help="1 or 2 option orders (2 cancels position bias)")
     ap.add_argument("--state", default="")
     ap.add_argument("--noul", default="")
@@ -79,15 +94,15 @@ def main(argv=None):
     except (BackendError, DecisionError) as e:
         hint = ""
         if "logprobs" in str(e) or "top_logprobs" in str(e):
-            hint = ("\n(reasoning models, such as OpenAI's o-series, return no logprobs: use a chat model like "
-                    "gpt-4.1-mini, or switch thinking off)")
+            hint = ("\n(some reasoning models return no logprobs at all: OpenAI's o-series, gpt-5, gpt-5-mini and "
+                    "gpt-5-nano. gpt-4.1*, gpt-4o* and gpt-5.1 and later with reasoning off do)")
         raise SystemExit(f"jevless: {e}{hint}")
 
 
 def run(args, decider):
     if args.command == "bench":
         from . import bench
-        items = bench.load(args.file) if args.file else bench.BUILTIN
+        items = bench.load(args.file) if args.file else bench.SETS[args.set]
         result = bench.run(decider, items, workers=args.workers)
         print(f"{args.backend} {args.model or ''} {args.url or ''}".strip())
         print(bench.report(result))

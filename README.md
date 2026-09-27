@@ -128,7 +128,7 @@ Measured from this machine on 25 September 2026, median per decision on the basi
 - **Packing questions.** Several questions about one state in one request, with a readout at each answer position. The state is sent once, which saves tokens and requests against rate limits. Later answers would see the earlier ones, so this needs measuring first.
 - **Prompt caching for long states.** OpenAI caches prompts of 1,024 tokens or more on its own (jevless already puts the state first); Anthropic needs `cache_control`. This matters for long states such as a memory gate over several recalled passages.
 - **A decision cache.** The same state and question should not be asked twice.
-- **A faster local setup.** On this machine, LM Studio splits the 9B across both GPUs. Pinned to one GPU under llama-server, it generated about 35% faster in an earlier throughput test; its decision time hasn't been measured yet. A cached state (the same state asked several questions) cuts one request to 0.11–0.15 s.
+- **A faster local setup.** LM Studio's only logprob endpoint (`/v1/responses`) adds about 0.2 s to every request. The same 9B file served by llama.cpp's `llama-server` on one GPU (`--backend openai --url http://127.0.0.1:8081`) answered the same single-order decisions in 399 ms median against 594 ms (p90 421 against 864 ms), identically. A cached state cuts one request to 0.11–0.22 s.
 
 ## Quick start
 
